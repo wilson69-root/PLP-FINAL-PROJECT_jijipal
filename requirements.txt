@@ -1,0 +1,10 @@
+streamlit
+transformers
+beautifulsoup4
+playwright
+requests
+huggingface_hub
+diskcache
+openpyxl
+python-dotenv
+streamlit-chat
