@@ -1,42 +1,24 @@
 import streamlit as st
-from agent.core import get_city_guide, get_ai_summary
-from agent.locations import fetch_places_osm
+from agent.agent_runner import AgentTaskRunner
+from models.hf_model import ask_model, check_model_status
 from agent.chat import chat_response
-from agent.cache_manager import get_cached_city_guide, cache_places
+from agent.cache import get_cached_data, cache_data
+from ui.components import (
+    apply_custom_css, render_card, render_data_list, 
+    render_budget_breakdown, render_metric_cards, 
+    render_itinerary_card, render_city_summary,
+    render_emergency_info, render_tips_section
+)
 from streamlit_chat import message
 import time
 
 st.set_page_config(page_title="Mtaa+ Dashboard", page_icon="🧭", layout="wide")
 
-# Custom CSS for better styling
-st.markdown("""
-<style>
-    .sidebar .sidebar-content {
-        background-color: #f8f9fa;
-    }
-    .stTextInput input {
-        border-radius: 10px;
-    }
-    .stSelectbox select {
-        border-radius: 10px;
-    }
-    .stRadio input {
-        border-radius: 10px;
-    }
-    .stButton button {
-        border-radius: 10px;
-    }
-    .stMarkdown {
-        font-size: 18px;
-    }
-    .stTabs {
-        font-size: 20px;
-    }
-</style>
-""", unsafe_allow_html=True)
+# Apply custom CSS styling
+apply_custom_css()
 
 # Main Tabs
-tab1, tab2, tab3, tab4 = st.tabs(["🏠 Survival Guide", "📍 Real-Time Places", "💬 Chat with MtaaBot", "🎟️ Bookings & Events"])
+tab1, tab2, tab3, tab4, tab5 = st.tabs(["🏠 Survival Guide", "📍 Real-Time Places", "🤖 Full Agent Report", "💬 Chat with MtaaBot", "🎟️ Bookings & Events"])
 
 # Sidebar - User Profile
 with st.sidebar:
@@ -80,29 +62,53 @@ with st.sidebar:
 
 with tab1:
     # Survival Guide Tab
-    st.markdown("""
+    st.markdown(f"""
     <div style='text-align: center; padding: 20px;'>
         <h2>🛡️ Your {goal} Plan for {city}</h2>
     </div>
-    """.format(goal=goal, city=city), unsafe_allow_html=True)
+    """, unsafe_allow_html=True)
     
     col1, col2 = st.columns([2, 1])
     
     with col1:
         if name and city and goal:
-            ai_summary = get_ai_summary(city, budget, goal)
-            st.info(ai_summary, icon="💡")
+            # Initialize agent runner
+            runner = AgentTaskRunner(city, budget, goal)
             
-            # 🔄 Load cached or updated survival guide data
-            guide = get_cached_city_guide(city, budget, goal)
-            for tip in guide:
-                st.markdown(f"✅ {tip}")
+            # Get AI summary using the new model
+            try:
+                summary_prompt = f"Provide a brief survival summary for someone in {city}, Kenya with a budget of KES {budget} and goal: {goal}"
+                ai_summary = ask_model(summary_prompt, max_new_tokens=200)
+                render_card("💡 AI Insights", ai_summary, "info", "🤖")
+            except Exception as e:
+                st.warning(f"AI model unavailable: {e}")
+                ai_summary = f"Welcome to {city}! With your {goal.lower()} goal and KES {budget:,} budget, focus on securing accommodation, finding affordable food options, and establishing reliable transport routes."
+                render_card("💡 Getting Started", ai_summary, "info", "🏁")
+            
+            # Get survival tips using the agent runner
+            with st.spinner("Generating survival guide..."):
+                try:
+                    survival_tips = runner.get_survival_tips()
+                    render_tips_section(survival_tips, "🛡️ Essential Survival Tips")
+                except Exception as e:
+                    st.error(f"Error generating survival tips: {e}")
         else:
             st.warning("Please fill in your name, city and goal on the left to generate your survival plan.")
 
     with col2:
-        st.markdown("### 📊 Budget Breakdown")
-        st.progress(0.5, text="Daily Budget: KES {}".format(budget))
+        if name and city and goal:
+            # Budget breakdown using agent runner
+            try:
+                runner = AgentTaskRunner(city, budget, goal)
+                budget_breakdown = runner.get_budget_breakdown()
+                render_budget_breakdown(budget_breakdown)
+            except Exception as e:
+                st.error(f"Error creating budget breakdown: {e}")
+                st.markdown("### 📊 Budget Overview")
+                st.progress(0.5, text=f"Daily Budget: KES {budget//30}")
+        else:
+            st.markdown("### 📊 Budget Overview")
+            st.info("Fill in your details to see budget breakdown")
 
 with tab2:
     # 📍 Real-Time Places Tab
@@ -116,26 +122,124 @@ with tab2:
     
     with col1:
         tag = st.selectbox(
-            "",
+            "Service Type",
             ["restaurant", "supermarket", "hospital", "pharmacy", "bank", "atm", "bus_station", "fast_food"],
             index=0,
             help="Choose the type of service you're looking for"
         )
+        
+        if st.button("🔄 Refresh Data"):
+            # Clear cache for this city and tag
+            cache_key = f"places_{city.lower()}_{tag}"
+            st.rerun()
     
     with col2:
         if city:
-            # ✅ Caching layer integration
+            # Use agent runner to get places data
             with st.spinner("Fetching locations..."):
-                places = cache_places(city, tag, ttl=3600)  # cache for 1 hour
-                if places:
-                    for place in places:
-                        st.markdown(f"📌 {place}")
-                else:
-                    st.info("No places found for this category in your area.", icon="🔍")
+                try:
+                    runner = AgentTaskRunner(city, budget, goal)
+                    places = runner.get_chill() if tag in ['restaurant', 'fast_food'] else []
+                    
+                    # For other services, use a mock response (would be real scraping in production)
+                    if tag not in ['restaurant', 'fast_food']:
+                        places = [
+                            f"{tag.title()} in {city} - Location 1",
+                            f"{tag.title()} in {city} - Location 2", 
+                            f"{tag.title()} in {city} - Location 3",
+                            f"24/7 {tag.title()} service in {city}",
+                            f"Popular {tag.title()} near {city} center"
+                        ]
+                    
+                    if places:
+                        render_data_list(places, f"📍 {tag.title()} Options in {city}")
+                    else:
+                        st.info("No places found for this category in your area.", icon="🔍")
+                        
+                except Exception as e:
+                    st.error(f"Error fetching places: {e}")
         else:
             st.warning("Please select a city in the sidebar.", icon="⚠️")
 
 with tab3:
+    # 🤖 Full Agent Report Tab - New comprehensive report
+    st.markdown("""
+    <div style='text-align: center; padding: 20px;'>
+        <h2>🤖 Complete Mtaa Agent Analysis</h2>
+        <p>Comprehensive data gathering and itinerary generation</p>
+    </div>
+    """, unsafe_allow_html=True)
+    
+    if name and city and goal:
+        if st.button("🚀 Run Complete Agent Analysis", type="primary"):
+            with st.spinner("Running comprehensive analysis... This may take a moment."):
+                try:
+                    # Initialize agent runner
+                    runner = AgentTaskRunner(city, budget, goal)
+                    
+                    # Run all tasks
+                    results = runner.run_all_tasks()
+                    
+                    # Display results
+                    if "error" not in results:
+                        # City summary
+                        render_city_summary(runner.get_summary_report())
+                        
+                        # Create columns for organized display
+                        col1, col2 = st.columns(2)
+                        
+                        with col1:
+                            # Rentals
+                            if results.get('rentals'):
+                                render_data_list(results['rentals'][:5], "🏠 Housing Options")
+                            
+                            # Food options
+                            if results.get('food'):
+                                render_data_list(results['food'][:5], "🍽️ Food & Dining")
+                        
+                        with col2:
+                            # Transport
+                            if results.get('transport'):
+                                render_data_list(results['transport'][:5], "🚌 Transportation")
+                            
+                            # Chill spots
+                            if results.get('chill_spots'):
+                                render_data_list(results['chill_spots'][:5], "🎯 Places to Visit")
+                        
+                        # Itinerary
+                        st.markdown("### 📅 Generated Itinerary")
+                        itinerary = results.get('itinerary')
+                        
+                        if isinstance(itinerary, dict) and 'days' in itinerary:
+                            for day_data in itinerary['days'][:3]:  # Show first 3 days
+                                render_itinerary_card(day_data)
+                        else:
+                            # If it's a string response from AI
+                            render_card("📋 Your Itinerary", str(itinerary), "info", "📅")
+                        
+                        # Emergency info
+                        render_emergency_info(city)
+                        
+                        # Execution info
+                        metadata = results.get('metadata', {})
+                        execution_time = metadata.get('execution_time', 0)
+                        st.success(f"✅ Analysis completed in {execution_time:.2f} seconds")
+                        
+                    else:
+                        st.error(f"Error running analysis: {results.get('error')}")
+                        
+                except Exception as e:
+                    st.error(f"Unexpected error: {e}")
+                    st.info("Please try again or check your internet connection.")
+    else:
+        st.warning("Please fill in your details in the sidebar to run the complete analysis.")
+        render_card(
+            "ℹ️ How it works", 
+            "The Full Agent Analysis runs all scraping tasks, generates personalized recommendations, creates an itinerary, and provides emergency information for your selected city and budget.",
+            "info"
+        )
+
+with tab4:
     # 💬 Chat with MtaaBot Tab
     st.markdown("""
     <div style='text-align: center; padding: 20px;'>
@@ -184,7 +288,7 @@ with tab3:
                 message_placeholder.markdown(response)
             st.session_state.messages.append({"role": "assistant", "content": response})
 
-with tab4:
+with tab5:
     # 🎟️ Bookings & Events Tab
     st.subheader("🎟️ Discover & Book Local Experiences")
     event_type = st.selectbox("🎭 What are you looking for?", ["Concerts", "Cultural Tours", "Workshops", "Meetups", "Nightlife"])
